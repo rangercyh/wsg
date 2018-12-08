@@ -42,8 +42,8 @@ func (c *Client) readPump() {
 		c.serverConn.Close()
 	}()
 	c.clientConn.SetReadLimit(maxMessageSize)
-	c.clientConn.SetReadDeadline(time.Now().Add(pongWait))
-	c.clientConn.SetPongHandler(func(string) error { c.clientConn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
+	// c.clientConn.SetReadDeadline(time.Now().Add(pongWait))
+	// c.clientConn.SetPongHandler(func(string) error { c.clientConn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
 	for {
 		_, message, err := c.clientConn.ReadMessage()
 		if err != nil {
@@ -91,6 +91,7 @@ func (c *Client) run() {
 
 // serveWs handles websocket requests from the peer.
 func serveWs(server *Server, w http.ResponseWriter, r *http.Request) {
+	upgrader.CheckOrigin = func(r *http.Request) bool { return true }
 	clientConn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println(err)
