@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/binary"
 	"log"
 	"net/http"
 	"time"
@@ -42,8 +45,6 @@ func (c *Client) readPump() {
 		c.serverConn.Close()
 	}()
 	c.clientConn.SetReadLimit(maxMessageSize)
-	// c.clientConn.SetReadDeadline(time.Now().Add(pongWait))
-	// c.clientConn.SetPongHandler(func(string) error { c.clientConn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
 	for {
 		_, message, err := c.clientConn.ReadMessage()
 		if err != nil {
@@ -66,21 +67,29 @@ func (c *Client) writePump() {
 		c.serverConn.Close()
 		c.clientConn.Close()
 	}()
-	b := make([]byte, maxMessageSize)
-	for {
-		n, err := c.serverConn.Read(b)
-		if err != nil {
-			// The hub closed the channel.
-			c.clientConn.WriteMessage(websocket.CloseMessage, []byte{})
-			log.Printf("error: %v", err)
-			break
-		}
 
+	scanner := bufio.NewScanner(c.serverConn)
+	split := func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+		if !atEOF && len(data) > 2 {
+			var dataLen int16
+			binary.Read(bytes.NewReader(data[0:2]), binary.BigEndian, &dataLen)
+			if len(data) >= int(dataLen)+2 {
+				return int(dataLen) + 2, data[:int(dataLen)+2], nil
+			}
+		}
+		return
+	}
+	scanner.Split(split)
+	for scanner.Scan() {
 		c.clientConn.SetWriteDeadline(time.Now().Add(writeWait))
-		if err := c.clientConn.WriteMessage(websocket.TextMessage, b[:n]); err != nil {
+		if err := c.clientConn.WriteMessage(websocket.TextMessage, scanner.Bytes()); err != nil {
 			log.Printf("error: %v", err)
 			break
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		c.clientConn.WriteMessage(websocket.CloseMessage, []byte{})
+		log.Printf("error: %v", err)
 	}
 }
 
