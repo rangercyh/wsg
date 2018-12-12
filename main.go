@@ -7,7 +7,7 @@ import (
 )
 
 var addr = flag.String("addr", ":8080", "websocket service address")
-var server = flag.String("server", "127.0.0.1:8081", "backend server address")
+var server = flag.String("server", "127.0.0.1:8290", "backend server address")
 
 func main() {
 	flag.Parse()

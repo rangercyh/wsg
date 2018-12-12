@@ -74,7 +74,7 @@ func (c *Client) writePump() {
 			var dataLen int16
 			binary.Read(bytes.NewReader(data[0:2]), binary.BigEndian, &dataLen)
 			if len(data) >= int(dataLen)+2 {
-				return int(dataLen) + 2, data[:int(dataLen)+2], nil
+				return int(dataLen) + 2, data[2 : int(dataLen)+2], nil
 			}
 		}
 		return
