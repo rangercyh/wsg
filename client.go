@@ -16,7 +16,7 @@ const (
 	writeWait = 10 * time.Second
 
 	// Maximum message size allowed from peer.
-	maxMessageSize = 512
+	maxMessageSize = 1024 * 5
 )
 
 var upgrader = websocket.Upgrader{
