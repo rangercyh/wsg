@@ -15,15 +15,16 @@ import (
     "github.com/gobwas/ws/wsutil"
     "github.com/mailru/easygo/netpoll"
 
-    "net/http"
+    "golang.org/x/net/netutil"
 )
 
 var (
-    addr      = flag.String("listen", ":8080", "address to bind to")
-    server    = flag.String("server", "127.0.0.1:8000", "backend server address")
-    workers   = flag.Int("workers", 128, "max workers count")
-    queue     = flag.Int("queue", 1, "workers task queue size")
-    ioTimeout = flag.Duration("io_timeout", time.Millisecond*1000, "i/o operations timeout")
+    addr         = flag.String("listen", ":8080", "address to bind to")
+    max_conn_num = flag.Int("max_conn_num", 60000, "max listen connection")
+    server       = flag.String("server", "127.0.0.1:8000", "backend server address")
+    workers      = flag.Int("workers", 128, "max workers count")
+    queue        = flag.Int("queue", 1, "workers task queue size")
+    ioTimeout    = flag.Duration("io_timeout", time.Millisecond*1000, "i/o operations timeout")
 )
 
 func nameConn(conn net.Conn) string {
@@ -237,8 +238,10 @@ func main() {
     if err != nil {
         log.Fatal(err)
     }
+    ln = LimitListener(ln, max_conn_num)
 
     log.Printf("websocket is listening on %s", ln.Addr().String())
+    defer ln.Close()
 
     // Create netpoll descriptor for the listener.
     // We use OneShot here to manually resume events stream when we want to.
