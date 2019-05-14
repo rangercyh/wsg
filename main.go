@@ -123,9 +123,11 @@ func create_bridge(pool *gopool.Pool, conn net.Conn, server_addr string) *Bridge
         return nil, err
     }
 
+    safeConn := deadliner{svr_conn, *ioTimeout}
+
     bridge := &Bridge{
         client_conn: conn,
-        server_conn: svr_conn,
+        server_conn: safeConn,
         pool:        pool,
     }
 
