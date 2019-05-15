@@ -1,138 +1,26 @@
 package main
 
 import (
-    "bufio"
-    "bytes"
-    "encoding/binary"
+    "./gopool"
+
     "flag"
-    "gopool"
-    "io"
     "log"
     "net"
     "time"
 
     "github.com/gobwas/ws"
-    "github.com/gobwas/ws/wsutil"
     "github.com/mailru/easygo/netpoll"
-
-    "golang.org/x/net/netutil"
 )
 
 var (
-    addr         = flag.String("listen", ":8080", "address to bind to")
-    max_conn_num = flag.Int("max_conn_num", 60000, "max listen connection")
-    server       = flag.String("server", "127.0.0.1:8000", "backend server address")
-    workers      = flag.Int("workers", 128, "max workers count")
-    queue        = flag.Int("queue", 1, "workers task queue size")
-    ioTimeout    = flag.Duration("io_timeout", time.Millisecond*1000, "i/o operations timeout")
+    addr          = flag.String("listen", ":8080", "address to bind to")
+    max_conn_num  = flag.Int("max_conn_num", 20000, "max listen connection")
+    max_read_size = flag.Int64("max_read_size", 32*1024, "max read size")
+    server        = flag.String("server", "127.0.0.1:8000", "backend server address")
+    workers       = flag.Int("workers", 128, "max workers count")
+    queue         = flag.Int("queue", 1, "workers task queue size")
+    ioTimeout     = flag.Duration("io_timeout", time.Millisecond*1000, "i/o operations timeout")
 )
-
-func nameConn(conn net.Conn) string {
-    return conn.LocalAddr().String() + " > " + conn.RemoteAddr().String()
-}
-
-// deadliner is a wrapper around net.Conn that sets read/write deadlines before
-// every Read() or Write() call.
-type deadliner struct {
-    net.Conn
-    t time.Duration
-}
-
-func (d deadliner) Write(p []byte) (int, error) {
-    if err := d.Conn.SetWriteDeadline(time.Now().Add(d.t)); err != nil {
-        return 0, err
-    }
-    return d.Conn.Write(p)
-}
-
-func (d deadliner) Read(p []byte) (int, error) {
-    if err := d.Conn.SetReadDeadline(time.Now().Add(d.t)); err != nil {
-        return 0, err
-    }
-    return d.Conn.Read(p)
-}
-
-type Bridge struct {
-    io          sync.Mutex
-    client_conn io.ReadWriteCloser
-    server_conn io.ReadWriteCloser
-    pool        *gopool.Pool
-}
-
-func (b *Bridge) Forward() error {
-    b.io.Lock()
-    defer b.io.Unlock()
-
-    h, r, err := wsutil.NextReader(b.client_conn, ws.StateServerSide)
-    if err != nil {
-        log.Printf("%s client conn read error: %v", nameConn(b.client_conn), err)
-        return err
-    }
-    if h.OpCode.IsControl() {
-        err = wsutil.ControlFrameHandler(b.client_conn, ws.StateServerSide)(h, r)
-        if err != nil {
-            log.Printf("%s client conn control process error: %v", nameConn(b.client_conn), err)
-        }
-        return err
-    }
-    if _, err = io.Copy(b.server_conn, r); err != nil {
-        log.Printf("%s forward copy error: %v", nameConn(b.client_conn), err)
-        return err
-    }
-
-    return nil
-}
-
-func (b *Bridge) Response() error {
-    b.io.Lock()
-    defer b.io.Unlock()
-
-    scanner := bufio.NewScanner(b.server_conn)
-    split := func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-        if !atEOF && len(data) > 2 {
-            var dataLen int16
-            binary.Read(bytes.NewReader(data[0:2]), binary.BigEndian, &dataLen)
-            if len(data) >= int(dataLen)+2 {
-                return int(dataLen) + 2, data[2 : int(dataLen)+2], nil
-            }
-        }
-        return
-    }
-    scanner.Split(split)
-    for scanner.Scan() {
-        if err := wsutil.WriteServerMessage(b.client_conn, ws.OpText, scanner.byte()); err != nil {
-            log.Printf("%s response to client error: %v", nameConn(b.server_conn), err)
-        }
-    }
-    if err := scanner.Err(); err != nil {
-        log.Printf("%s server conn scanner error: %v", nameConn(b.server_conn), err)
-        return err
-    }
-
-    return nil
-}
-
-func (b *Bridge) Close() {
-    b.client_conn.Close()
-    b.server_conn.Close()
-}
-
-func create_bridge(pool *gopool.Pool, conn net.Conn, server_addr string) *Bridge {
-    svr_conn, err := net.Dial("tcp", server_addr)
-    if err != nil {
-        return nil, err
-    }
-
-    safeConn := deadliner{svr_conn, *ioTimeout}
-
-    bridge := &Bridge{
-        client_conn: conn,
-        server_conn: safeConn,
-        pool:        pool,
-    }
-
-    return bridge
-}
 
 func main() {
     flag.Parse()
@@ -150,6 +38,12 @@ func main() {
         pool = gopool.NewPool(*workers, *queue, 1)
         exit = make(chan struct{})
     )
+    close_all := func(bridge *Bridge) {
+        poller.Stop(bridge.cli_desc)
+        poller.Stop(bridge.svr_desc)
+        bridge.Close()
+    }
+
     // handle is a new incoming connection handler.
     // It upgrades TCP connection to WebSocket, registers netpoll listener on
     //
@@ -157,29 +51,31 @@ func main() {
     handle := func(conn net.Conn) {
         // NOTE: we wrap conn here to show that ws could work with any kind of
         // io.ReadWriter.
-        safeConn := deadliner{conn, *ioTimeout}
+        safeConn := deadliner{conn, *ioTimeout, nameConn(conn, false)}
 
         // Zero-copy upgrade to WebSocket connection.
-        hs, err := ws.Upgrade(safeConn)
+        _, err := ws.Upgrade(safeConn)
         if err != nil {
-            log.Printf("%s: upgrade error: %v", nameConn(conn), err)
+            log.Printf("%s: upgrade error: %v", safeConn.name, err)
             conn.Close()
             return
         }
 
-        log.Printf("%s: established websocket connection: %+v", nameConn(conn), hs)
+        // log.Printf("%s: established websocket connection", safeConn.name)
 
         // Register incoming user in chat.
-        bridge, err := create_bridge(pool, safeConn, *server)
+        bridge, err := create_bridge(safeConn, *server)
         if err != nil {
-            log.Printf("%s: dail server error: %v", nameConn(conn), err)
+            log.Printf("%s: dail server error: %v", safeConn.name, err)
             conn.Close()
             return
         }
 
         // Create netpoll event descriptor for conn.
         // We want to handle only read events of it.
-        client_desc := netpoll.Must(netpoll.HandleRead(bridge.client_conn))
+        client_desc := netpoll.Must(netpoll.HandleRead(conn))
+        server_desc := netpoll.Must(netpoll.HandleRead(bridge.server_conn))
+        bridge.Add_Desc(client_desc, server_desc)
 
         // Subscribe to events about client conn.
         poller.Start(client_desc, func(ev netpoll.Event) {
@@ -188,8 +84,7 @@ func main() {
                 // closed at least write end of the connection or connections
                 // itself. So we want to stop receive events about such conn
                 // and disconnect from the server.
-                poller.Stop(client_desc)
-                bridge.close()
+                close_all(bridge)
                 return
             }
             // Here we can read some new message from connection.
@@ -201,13 +96,12 @@ func main() {
                 if err := bridge.Forward(); err != nil {
                     // When receive failed, we can only disconnect broken
                     // connection and stop to receive events about it.
-                    poller.Stop(client_desc)
-                    bridge.close()
+                    close_all(bridge)
                 }
             })
         })
-
-        server_desc := netpoll.Must(netpoll.HandleRead(bridge.server_conn))
+        // netpoll.Must(netpoll.HandleRead(bridge.server_conn))
+        // bridge.server_conn.Close()
         // Subscribe to events about server conn.
         poller.Start(server_desc, func(ev netpoll.Event) {
             if ev&(netpoll.EventReadHup|netpoll.EventHup) != 0 {
@@ -215,8 +109,7 @@ func main() {
                 // closed at least write end of the connection or connections
                 // itself. So we want to stop receive events about such conn
                 // and disconnect from the client.
-                poller.Stop(server_desc)
-                bridge.close()
+                close_all(bridge)
                 return
             }
             // Here we can read some new message from connection.
@@ -228,8 +121,7 @@ func main() {
                 if err := bridge.Response(); err != nil {
                     // When receive failed, we can only disconnect broken
                     // connection and stop to receive events about it.
-                    poller.Stop(server_desc)
-                    bridge.close()
+                    close_all(bridge)
                 }
             })
         })
@@ -240,7 +132,7 @@ func main() {
     if err != nil {
         log.Fatal(err)
     }
-    ln = LimitListener(ln, max_conn_num)
+    ln = LimitListener(ln, *max_conn_num)
 
     log.Printf("websocket is listening on %s", ln.Addr().String())
     defer ln.Close()
