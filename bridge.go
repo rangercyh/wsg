@@ -4,6 +4,7 @@ import (
     "bufio"
     "bytes"
     "encoding/binary"
+    "errors"
     "github.com/gobwas/ws"
     "github.com/gobwas/ws/wsutil"
     "github.com/mailru/easygo/netpoll"
@@ -14,6 +15,8 @@ import (
     "sync"
     "time"
 )
+
+var ErrExceededLimit = errors.New("websocket: read limit exceeded")
 
 func nameConn(conn net.Conn, active bool) string {
     if active {
@@ -76,8 +79,10 @@ func (b *Bridge) Forward() error {
         }
         return err
     }
-    lr := LimitReader(r, *max_read_size)
-    if _, err = io.Copy(b.server_conn, lr); err != nil {
+    if h.Length > *max_read_size {
+        return ErrExceededLimit
+    }
+    if _, err = io.Copy(b.server_conn, r); err != nil {
         log.Printf("%s forward copy error: %v", b.client_name, err)
         return err
     }
